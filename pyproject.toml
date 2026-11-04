@@ -1,0 +1,30 @@
+[project]
+name = "scoutai"
+version = "0.1.0"
+description = "Chat with any website: crawl it, index it locally, and get cited answers."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Pranudeep Metuku" }]
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

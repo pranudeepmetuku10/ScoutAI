@@ -25,7 +25,6 @@ uv run ruff check .
 
 ## Acknowledgements
 
-Inspired by the BrowseAI project in [Ramakm/RAG](https://github.com/Ramakm/RAG) (MIT License).
 ScoutAI is an independent implementation.
 
 ## License

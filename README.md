@@ -13,6 +13,20 @@ with citations to the pages they came from.
 - Streaming answers with verified citations, from Ollama, OpenAI-compatible APIs or Claude
 - Built-in eval harness (recall@k, MRR, faithfulness)
 
+## Try the crawler
+
+```bash
+uv sync
+uv run scoutai crawl https://docs.astral.sh/uv/ --same-path --max-pages 50 --depth 3 --out pages.json
+```
+
+For JavaScript-heavy sites, install the optional renderer once:
+
+```bash
+uv sync --extra js
+uv run playwright install chromium
+```
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/).

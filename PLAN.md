@@ -45,7 +45,7 @@ ScoutAI/
 Each milestone ends in a commit that works and is tested.
 
 - [x] **M0: Skeleton.** uv project, ruff, pytest, CI, license, README, PLAN, CLAUDE.md.
-- [ ] **M1: Crawler + extractor.** BFS same-site crawl, robots.txt + crawl-delay, sitemap index support,
+- [x] **M1: Crawler + extractor.** BFS same-site crawl, robots.txt + crawl-delay, sitemap index support,
   URL normalization, redirect dedupe, per-host rate limit, optional Playwright with page concurrency limit.
   Block private/loopback IPs by default (SSRF guard).
   *Done when:* fixture-HTML tests pass and a 50-page site crawls reproducibly.

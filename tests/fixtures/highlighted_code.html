@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><title>Installing uv</title></head>
+<body><main><article>
+<h1>Installing uv</h1>
+<p>uv provides a standalone installer that downloads the latest release and puts it on your path.
+It works on macOS and Linux and does not require Python to be installed first.</p>
+<p>Use <code>curl</code> to download the script and execute it with <code>sh</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="l-0-1" name="l-0-1" href="#l-0-1"></a><span class="gp">$ </span>curl<span class="w"> </span>-LsSf<span class="w"> </span>https://astral.sh/uv/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>sh
+</code></pre></div>
+<p>If your system does not have <code>curl</code>, you can use <code>wget</code> instead, which behaves
+the same way and also pipes the installer straight into your shell for a one-step setup.</p>
+<div class="highlight"><pre><span></span><code><a id="l-1-1" name="l-1-1" href="#l-1-1"></a><span class="gp">$ </span>wget<span class="w"> </span>-qO-<span class="w"> </span>https://astral.sh/uv/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>sh
+</code></pre></div>
+</article></main></body></html>

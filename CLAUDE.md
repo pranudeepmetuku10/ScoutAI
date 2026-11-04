@@ -9,6 +9,7 @@ The roadmap and milestone status live in [PLAN.md](PLAN.md); read it first and t
 - Tests: `uv run pytest`
 - Lint + format check: `uv run ruff check . && uv run ruff format --check .`
 - Auto-fix: `uv run ruff check --fix . && uv run ruff format .`
+- Try a crawl: `uv run scoutai crawl <url> --max-pages 25 --depth 2 [--same-path] [--js off|auto|always] [--out f.json] [-v]`
 
 ## Conventions
 
@@ -20,6 +21,10 @@ The roadmap and milestone status live in [PLAN.md](PLAN.md); read it first and t
 - Retrieval changes must be justified by the eval harness (`evals/`), not by eyeballing a few answers.
 - This is an original implementation. Don't copy code from the reference BrowseAI project
   (`~/github_projects/BrowseAI_RAG`); reimplement ideas instead.
+
+## Git
+
+- Never commit or push without asking the user first, every time. Finish the work, show what changed, then ask.
 
 ## Safety
 

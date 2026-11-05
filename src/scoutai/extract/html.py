@@ -92,7 +92,10 @@ def extract_links(tree: _Element, url: str) -> list[str]:
     for a in tree.iterfind(".//a[@href]"):
         href = a.get("href", "").strip()
         if href and not href.lower().startswith(UNFOLLOWABLE):
-            seen.setdefault(urljoin(base, href), None)
+            try:
+                seen.setdefault(urljoin(base, href), None)
+            except ValueError:  # e.g. an unterminated IPv6 literal; one bad link mustn't sink the page
+                continue
     return list(seen)
 
 
@@ -118,7 +121,7 @@ def _with_trafilatura(html: str, url: str) -> str:
         include_images=False,
         include_comments=False,
         favor_recall=True,
-        deduplicate=True,
+        deduplicate=False,  # its cache is process-global; M2's cleaner dedupes per crawl instead
     )
     return text or ""
 

@@ -17,9 +17,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from scoutai.config import Settings, get_settings
-from scoutai.crawl.fetcher import HostRateLimiter, build_client, fetch
+from scoutai.crawl.fetcher import FETCH_ERRORS, HostRateLimiter, build_client, fetch
 from scoutai.crawl.guard import BlockedHostError, HostGuard, Resolver, system_resolver
-from scoutai.crawl.renderer import JSRenderer
+from scoutai.crawl.renderer import JSRenderer, RenderedPage
 from scoutai.crawl.robots import Robots, robots_from_response
 from scoutai.crawl.sitemap import parse_sitemap
 from scoutai.crawl.urls import in_scope, normalize_url, path_prefix, site_host, url_key
@@ -115,33 +115,55 @@ class Crawler:
         self._guard = HostGuard(allow_private=self.settings.allow_private_hosts, resolver=resolver)
         self._limiter = HostRateLimiter(self.settings.request_delay)
         self._renderer = renderer or JSRenderer()
-        self._robots = Robots.allow_all()
+        self._robots: dict[str, asyncio.Future[Robots]] = {}  # origin -> its robots.txt, loaded once
         self._client: httpx.AsyncClient | None = None
         self._js_warned = False
 
     # -- scope -----------------------------------------------------------------------------------
 
-    def _allowed(self, url: str) -> bool:
-        return in_scope(url, host=self.host, prefix=self.prefix) and self._robots.can_fetch(url)
+    async def _allowed(self, url: str) -> bool:
+        if not in_scope(url, host=self.host, prefix=self.prefix):
+            return False
+        return (await self._robots_for(url)).can_fetch(url)
 
-    def _origin(self) -> str:
-        parts = urlsplit(self.start_url)
+    @staticmethod
+    def _origin(url: str) -> str:
+        parts = urlsplit(url)
         return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+    @staticmethod
+    def _normalize(url: str) -> str | None:
+        """normalize_url, or None for URLs too malformed to use (bad port, broken IPv6 literal)."""
+        try:
+            return normalize_url(url)
+        except ValueError:
+            return None
 
     # -- discovery -------------------------------------------------------------------------------
 
-    async def _load_robots(self) -> Robots:
+    def _robots_for(self, url: str) -> asyncio.Future[Robots]:
+        """robots.txt applies per origin (scheme + host + port), so `http://x`, `https://x` and
+        `https://www.x` each get their own. Concurrent callers share one in-flight fetch."""
+        origin = self._origin(url)
+        if origin not in self._robots:
+            self._robots[origin] = asyncio.ensure_future(self._load_robots(origin))
+        return self._robots[origin]
+
+    async def _load_robots(self, origin: str) -> Robots:
         try:
             response = await fetch(
-                self._client, f"{self._origin()}/robots.txt", max_bytes=self.settings.max_response_bytes
+                self._client, f"{origin}/robots.txt", max_bytes=self.settings.max_response_bytes
             )
-            return robots_from_response(response.status, response.text)
-        except (httpx.HTTPError, BlockedHostError):
-            return Robots.allow_all()
+            robots = robots_from_response(response.status, response.text)
+        except FETCH_ERRORS:
+            robots = Robots.allow_all()
+        host = urlsplit(origin).hostname or ""
+        self._limiter.set_delay(host, max(self.settings.request_delay, robots.crawl_delay))
+        return robots
 
-    async def _sitemap_urls(self) -> list[str]:
+    async def _sitemap_urls(self, robots: Robots) -> list[str]:
         """Page URLs from robots-declared sitemaps (or /sitemap.xml), following sitemap indexes."""
-        queue = list(self._robots.sitemaps) or [f"{self._origin()}/sitemap.xml"]
+        queue = list(robots.sitemaps) or [f"{self._origin(self.start_url)}/sitemap.xml"]
         visited: set[str] = set()
         pages: list[str] = []
         limit = self.max_pages * 4
@@ -152,21 +174,31 @@ class Crawler:
             visited.add(sitemap_url)
             try:
                 response = await fetch(self._client, sitemap_url, max_bytes=self.settings.max_response_bytes)
-            except (httpx.HTTPError, BlockedHostError, ValueError):
+            except FETCH_ERRORS:
                 continue
             if response.status != 200:
                 continue
             parsed = parse_sitemap(response.body)
             queue.extend(parsed.children)
-            pages.extend(normalize_url(u) for u in parsed.pages if self._allowed(normalize_url(u)))
+            for raw in parsed.pages:
+                url = self._normalize(raw)
+                if url and await self._allowed(url):
+                    pages.append(url)
         return list(dict.fromkeys(pages))[:limit]
 
     # -- fetching --------------------------------------------------------------------------------
 
-    async def _render(self, url: str) -> str | None:
-        await self._guard.check(urlsplit(url).hostname or "")
-        html = await self._renderer.render(url)
-        if html is None and self._renderer.available is False and not self._js_warned:
+    async def _browser_request_check(self, url: str, is_navigation: bool) -> None:
+        """Applied to every request the headless browser makes: the SSRF guard always, and the rate
+        limit for page loads (subresources would make rendering too slow under a long Crawl-delay)."""
+        host = urlsplit(url).hostname or ""
+        await self._guard.check(host)
+        if is_navigation:
+            await self._limiter.wait(host)
+
+    async def _render(self, url: str) -> RenderedPage | None:
+        rendered = await self._renderer.render(url, self._browser_request_check)
+        if rendered is None and self._renderer.available is False and not self._js_warned:
             self._js_warned = True
             await self.emit(
                 "log",
@@ -174,7 +206,7 @@ class Crawler:
                 message="JavaScript rendering unavailable (install the `js` extra and run "
                 "`playwright install chromium`). Continuing with static HTML.",
             )
-        return html
+        return rendered
 
     async def _fetch_page(self, url: str, depth: int) -> _Fetched:
         final_url, extracted, etag, last_modified = url, None, None, None
@@ -185,20 +217,25 @@ class Crawler:
             if not response.is_html:
                 return _Fetched(None, Skip(url, f"not HTML ({response.content_type})"))
             final_url = normalize_url(response.url)
-            if not self._allowed(final_url):
+            if not await self._allowed(final_url):
                 return _Fetched(None, Skip(url, f"redirected out of scope to {final_url}"))
             extracted = extract(response.text, final_url)
             etag, last_modified = response.etag, response.last_modified
 
         rendered = False
+        failure = "JavaScript rendering failed"
         if self.js_mode == "always" or (self.js_mode == "auto" and extracted and extracted.looks_js_rendered):
-            html = await self._render(final_url)
-            if html:
-                candidate = extract(html, final_url)
+            result = await self._render(final_url)
+            # The browser may have been redirected, or navigated by script, so scope-check where it landed.
+            landed = self._normalize(result.url) if result else None
+            if result and landed and await self._allowed(landed):
+                candidate = extract(result.html, landed)
                 if extracted is None or len(candidate.markdown) > len(extracted.markdown):
-                    extracted, rendered = candidate, True
+                    extracted, rendered, final_url = candidate, True, landed
+            elif result:
+                failure = f"JavaScript navigated out of scope to {result.url}"
         if extracted is None:
-            return _Fetched(None, Skip(url, "JavaScript rendering failed"))
+            return _Fetched(None, Skip(url, failure))
 
         page = Page(
             url=final_url,
@@ -219,7 +256,7 @@ class Crawler:
             async with semaphore:
                 try:
                     return await self._fetch_page(url, depth)
-                except (httpx.HTTPError, BlockedHostError, ValueError, OSError) as e:
+                except FETCH_ERRORS as e:
                     reason = str(e) or e.__class__.__name__
                     return _Fetched(None, Skip(url, reason[:200]))
 
@@ -243,17 +280,17 @@ class Crawler:
         ) as client:
             self._client = client
             try:
-                self._robots = await self._load_robots()
-                delay = max(self.settings.request_delay, self._robots.crawl_delay)
-                self._limiter.set_delay(urlsplit(self.start_url).hostname or "", delay)
-                if self._robots.crawl_delay > self.settings.request_delay:
+                robots = await self._robots_for(self.start_url)
+                if robots.crawl_delay > self.settings.request_delay:
                     await self.emit(
-                        "log", level="info", message=f"Respecting robots.txt Crawl-delay: {delay}s"
+                        "log",
+                        level="info",
+                        message=f"Respecting robots.txt Crawl-delay: {robots.crawl_delay}s",
                     )
-                if not self._robots.can_fetch(self.start_url):
+                if not robots.can_fetch(self.start_url):
                     raise CrawlError(f"robots.txt disallows crawling {self.start_url}")
 
-                sitemap = await self._sitemap_urls() if self.max_depth > 0 else []
+                sitemap = await self._sitemap_urls(robots) if self.max_depth > 0 else []
                 if sitemap:
                     await self.emit("log", level="info", message=f"sitemap: {len(sitemap)} in-scope URLs")
 
@@ -306,15 +343,16 @@ class Crawler:
         assert extracted is not None
         # Follow links even from pages we don't store (noindex, duplicates), unless nofollow.
         if depth < self.max_depth:
-            for link in page.links:
-                link = normalize_url(link)
-                if url_key(link) not in seen and self._allowed(link):
+            for raw in page.links:
+                link = self._normalize(raw)
+                if link and url_key(link) not in seen and await self._allowed(link):
                     seen.add(url_key(link))
                     next_frontier.append(link)
 
         keys = {url_key(url), url_key(page.url)}
-        if extracted.canonical and self._allowed(normalize_url(extracted.canonical)):
-            keys.add(url_key(extracted.canonical))
+        canonical = self._normalize(extracted.canonical) if extracted.canonical else None
+        if canonical and await self._allowed(canonical):
+            keys.add(url_key(canonical))
         seen.update(keys)
         reason = None
         if extracted.noindex:

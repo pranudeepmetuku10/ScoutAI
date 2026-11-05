@@ -3,20 +3,35 @@
 from __future__ import annotations
 
 import asyncio
-import gzip
 import re
+import zlib
 from dataclasses import dataclass
 
 import httpx
 
 from scoutai.config import USER_AGENT
-from scoutai.crawl.guard import HostGuard
+from scoutai.crawl.guard import BlockedHostError, HostGuard, PinnedNetworkBackend
 
 META_CHARSET = re.compile(rb"""<meta[^>]+charset=["']?([\w-]+)""", re.I)
 
 
-class ResponseTooLargeError(Exception):
+class FetchError(Exception):
+    """A response we refuse to use (too large, corrupt encoding)."""
+
+
+class ResponseTooLargeError(FetchError):
     pass
+
+
+# Everything a single fetch can raise that should skip that URL rather than abort the crawl.
+FETCH_ERRORS: tuple[type[Exception], ...] = (
+    httpx.HTTPError,
+    httpx.InvalidURL,
+    BlockedHostError,
+    FetchError,
+    OSError,
+    ValueError,
+)
 
 
 class HostRateLimiter:
@@ -73,6 +88,35 @@ def _encoding(response: httpx.Response, body: bytes) -> str:
     return "utf-8"
 
 
+def _gunzip(body: bytes, max_bytes: int) -> bytes:
+    """Decompress at most `max_bytes` of output, so a tiny gzip bomb can't expand to gigabytes."""
+    try:
+        return zlib.decompressobj(wbits=16 + zlib.MAX_WBITS).decompress(body, max_bytes)
+    except zlib.error as e:
+        raise FetchError(f"corrupt gzip body: {e}") from e
+
+
+class PinnedTransport(httpx.AsyncHTTPTransport):
+    """httpx's normal transport, but every TCP connection goes to an address the guard just approved.
+
+    httpx has no public option for this, so we swap in an httpcore pool with our network backend.
+    `tests/test_guard_robots_sitemap.py` asserts the swap took, so an httpx upgrade can't silently undo it.
+    """
+
+    def __init__(self, guard: HostGuard, *, limits: httpx.Limits | None = None):
+        import httpcore
+
+        super().__init__(trust_env=False)
+        limits = limits or httpx.Limits(max_connections=100, max_keepalive_connections=20)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpx.create_ssl_context(trust_env=False),
+            max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections,
+            keepalive_expiry=limits.keepalive_expiry,
+            network_backend=PinnedNetworkBackend(guard),
+        )
+
+
 def build_client(
     guard: HostGuard,
     limiter: HostRateLimiter,
@@ -81,7 +125,8 @@ def build_client(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> httpx.AsyncClient:
     async def on_request(request: httpx.Request) -> None:
-        # Runs for every request, including each redirect hop.
+        # Runs for every request, including each redirect hop. The pinned transport re-checks the exact
+        # address at connect time; this earlier check gives a clear error before any connection is made.
         await guard.check(request.url.host)
         await limiter.wait(request.url.host)
 
@@ -90,7 +135,8 @@ def build_client(
         follow_redirects=True,
         max_redirects=5,
         timeout=timeout,
-        transport=transport,
+        transport=transport or PinnedTransport(guard),
+        trust_env=False,  # an environment proxy would do its own DNS and bypass the pinned transport
         event_hooks={"request": [on_request]},
     )
 
@@ -108,7 +154,7 @@ async def fetch(client: httpx.AsyncClient, url: str, *, max_bytes: int) -> Fetch
             chunks.append(chunk)
     body = b"".join(chunks)
     if str(response.url).endswith(".gz") and body[:2] == b"\x1f\x8b":
-        body = gzip.decompress(body)[:max_bytes]
+        body = _gunzip(body, max_bytes)
     return FetchResult(
         url=str(response.url),
         status=response.status_code,

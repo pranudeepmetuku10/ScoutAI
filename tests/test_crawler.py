@@ -6,7 +6,9 @@ import pytest
 
 from scoutai.config import Settings
 from scoutai.crawl import Crawler, CrawlError
-from scoutai.crawl.fetcher import HostRateLimiter, ResponseTooLargeError, fetch
+from scoutai.crawl.fetcher import HostRateLimiter, ResponseTooLargeError, _gunzip, fetch
+from scoutai.crawl.guard import BlockedHostError
+from scoutai.crawl.renderer import RenderedPage
 
 ORIGIN = "https://site.example"
 FILLER = (
@@ -54,6 +56,9 @@ SITE = {
             "/missing",
             "/evil",
             "/feed",
+            "/huge",
+            "http://site.example:99999/bad-port",
+            "http://[::1/broken-ipv6",
         ),
     ),
     "/a": (200, "text/html", html_page("Page A", "/a/deep")),
@@ -83,6 +88,8 @@ def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(301, headers={"location": "/b"})
     if path == "/evil":
         return httpx.Response(302, headers={"location": "http://internal.example/admin"})
+    if path == "/huge":
+        return httpx.Response(200, headers={"content-type": "text/html"}, content=b"x" * 6_000_000)
     if path == "/pages.xml.gz":
         xml = (
             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
@@ -129,6 +136,7 @@ async def test_crawl_respects_scope_robots_and_dedupes():
     assert reasons["/missing"] == "HTTP 404"
     assert "non-public address" in reasons["/evil"]
     assert reasons["/feed"].startswith("not HTML")
+    assert "limit" in reasons["/huge"]  # skipped; doesn't abort the crawl
     assert "/secret" not in reasons  # filtered before fetching, never requested
 
 
@@ -172,8 +180,8 @@ async def test_js_auto_renders_thin_pages():
     class FakeRenderer:
         available = True
 
-        async def render(self, url):
-            return html_page("Rendered app")
+        async def render(self, url, check):
+            return RenderedPage(url, html_page("Rendered app"))
 
         async def close(self):
             pass
@@ -217,3 +225,58 @@ async def test_rate_limiter_spaces_requests():
     start = loop.time()
     await asyncio.gather(*(limiter.wait("h") for _ in range(4)))
     assert loop.time() - start >= 0.14
+
+
+def test_gunzip_caps_output():
+    bomb = gzip.compress(b"\0" * 50_000_000)  # ~50 KB on the wire
+    assert len(bomb) < 100_000
+    assert len(_gunzip(bomb, 1000)) == 1000
+
+
+async def test_robots_is_loaded_per_origin():
+    def two_origins(request):
+        if request.url.path == "/robots.txt":
+            rules = "Disallow: /private" if request.url.host == "www.site.example" else ""
+            return httpx.Response(200, text=f"User-agent: *\n{rules}")
+        links = ("https://www.site.example/private", "https://www.site.example/public")
+        body = html_page("Home", *links) if request.url.path == "/" else html_page(request.url.path)
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=body)
+
+    async def resolve(host):
+        return ["93.184.216.34"]
+
+    crawler = Crawler(
+        ORIGIN,
+        js_mode="off",
+        max_depth=1,
+        settings=Settings(request_delay=0.0),
+        transport=httpx.MockTransport(two_origins),
+        resolver=resolve,
+    )
+    assert paths(await crawler.run()) == ["/", "/public"]
+
+
+async def test_browser_is_guarded_and_scope_checked():
+    class HostileRenderer:
+        available = True
+
+        async def render(self, url, check):
+            with pytest.raises(BlockedHostError):  # the page's script tries to reach an internal host
+                await check("http://internal.example/admin", False)
+            return RenderedPage("https://other.example/landing", html_page("Somewhere else"))
+
+        async def close(self):
+            pass
+
+    crawler = Crawler(
+        ORIGIN,
+        js_mode="always",
+        max_depth=0,
+        settings=Settings(request_delay=0.0),
+        transport=httpx.MockTransport(handler),
+        resolver=resolver,
+        renderer=HostileRenderer(),
+    )
+    result = await crawler.run()
+    assert result.pages == []
+    assert "navigated out of scope" in result.skipped[0].reason

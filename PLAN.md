@@ -49,7 +49,7 @@ Each milestone ends in a commit that works and is tested.
   URL normalization, redirect dedupe, per-host rate limit, optional Playwright with page concurrency limit.
   Block private/loopback IPs by default (SSRF guard).
   *Done when:* fixture-HTML tests pass and a 50-page site crawls reproducibly.
-- [ ] **M2: Clean + chunk.** Cross-page boilerplate threshold, junk patterns, code-fence repair,
+- [x] **M2: Clean + chunk.** Cross-page boilerplate threshold, junk patterns, code-fence repair,
   heading-aware chunks with breadcrumbs, per-page content hash (for incremental re-crawl).
   *Done when:* unit tests cover boilerplate removal and chunk boundaries.
 - [ ] **M3: Eval harness (before any tuning).** 3 sites (docs, marketing, blog) × ~50 questions, each with

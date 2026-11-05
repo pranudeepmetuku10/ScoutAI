@@ -26,6 +26,8 @@ class Settings:
     # Seconds between requests to the same host; robots.txt Crawl-delay wins if larger.
     request_delay: float = field(default_factory=lambda: float(os.getenv("SCOUTAI_REQUEST_DELAY", "0.25")))
     request_timeout: float = field(default_factory=lambda: float(os.getenv("SCOUTAI_REQUEST_TIMEOUT", "20")))
+    chunk_size: int = field(default_factory=lambda: int(os.getenv("SCOUTAI_CHUNK_SIZE", "1000")))  # chars
+    chunk_overlap: int = field(default_factory=lambda: int(os.getenv("SCOUTAI_CHUNK_OVERLAP", "150")))
     max_response_bytes: int = field(
         default_factory=lambda: int(os.getenv("SCOUTAI_MAX_RESPONSE_BYTES", str(5 * 1024 * 1024)))
     )

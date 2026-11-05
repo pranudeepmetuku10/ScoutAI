@@ -1,7 +1,15 @@
 # ScoutAI
 
+I'm building this to learn, and I'll need to explain it in technical interviews.
+ Before implementing anything non-trivial, briefly state the approach and at
+  least one alternative you rejected, and why.
+ After each feature, append an entry to DECISIONS.md: what was built, key
+  design choices, tradeoffs, and anything that could break or not scale.
+  Don't silently add new libraries or patterns. Name them and say why.
+
 Local-first RAG app: crawl a website, build a knowledge base, chat with it using cited answers.
 The roadmap and milestone status live in [PLAN.md](PLAN.md); read it first and tick milestones off as they land.
+
 
 ## Commands
 
@@ -30,3 +38,4 @@ The roadmap and milestone status live in [PLAN.md](PLAN.md); read it first and t
 
 - The crawler must respect robots.txt, rate-limit per host, and refuse private/loopback addresses unless
   `SCOUTAI_ALLOW_PRIVATE_HOSTS=1`.
+
